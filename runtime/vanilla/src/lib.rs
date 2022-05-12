@@ -144,10 +144,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("vanilla"),
     impl_name: create_runtime_str!("vanilla"),
     authoring_version: 1,
-    spec_version: 185,
-    impl_version: 30,
+    spec_version: 186,
+    impl_version: 31,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 14,
+    transaction_version: 15,
     state_version: 0,
 };
 
@@ -249,6 +249,7 @@ impl Contains<Call> for WhiteListFilter {
             Call::Proxy(_) |
             Call::Identity(_) |
             Call::EmergencyShutdown(_) |
+            Call::CurrencyAdapter(_) |
             Call::XcmHelper(_) |
             // 3rd Party
             Call::Oracle(_) |
@@ -1062,9 +1063,15 @@ impl BalanceConversion<Balance, CurrencyId, Balance> for GiftConvert {
             return Ok(Zero::zero());
         }
 
-        let default_gift_amount = DOLLARS / 4; // 0.25HKO
+        let default_gift_amount = 5 * DOLLARS / 2; // 2.5HKO
         Ok(match asset_id {
-            KSM if balance >= 10_u128.pow((decimal - 1).into()) => default_gift_amount,
+            KSM if balance
+                >= 10_u128
+                    .pow((decimal - 1).into())
+                    .saturating_sub(96_000_000u128) =>
+            {
+                default_gift_amount
+            }
             EUSDT | EUSDC if balance >= 300 * 10_u128.pow(decimal.into()) => default_gift_amount,
             _ => Zero::zero(),
         })
@@ -1866,6 +1873,7 @@ impl pallet_crowdloans::Config for Runtime {
 parameter_types! {
     pub const StreamPalletId: PalletId = PalletId(*b"par/strm");
     pub const MaxStreamsCount: u32 = 128;
+    pub const MaxFinishedStreamsCount: u32 = 2;
 }
 
 impl pallet_streaming::Config for Runtime {
@@ -1873,9 +1881,10 @@ impl pallet_streaming::Config for Runtime {
     type Assets = CurrencyAdapter;
     type PalletId = StreamPalletId;
     type MaxStreamsCount = MaxStreamsCount;
+    type MaxFinishedStreamsCount = MaxFinishedStreamsCount;
     type UnixTime = Timestamp;
     type UpdateOrigin = EnsureRootOrMoreThanHalfGeneralCouncil;
-    type WeightInfo = pallet_streaming::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = weights::pallet_streaming::WeightInfo<Runtime>;
 }
 
 parameter_types! {
@@ -2242,6 +2251,7 @@ impl_runtime_apis! {
             list_benchmark!(list, extra, pallet_crowdloans, Crowdloans);
             list_benchmark!(list, extra, pallet_xcm_helper, XcmHelper);
             list_benchmark!(list, extra, pallet_asset_registry, AssetRegistry);
+            list_benchmark!(list, extra, pallet_streaming, Streaming);
 
             let storage_info = AllPalletsWithSystem::storage_info();
 
@@ -2289,6 +2299,7 @@ impl_runtime_apis! {
             add_benchmark!(params, batches, pallet_crowdloans, Crowdloans);
             add_benchmark!(params, batches, pallet_xcm_helper, XcmHelper);
             add_benchmark!(params, batches, pallet_asset_registry, AssetRegistry);
+            add_benchmark!(params, batches, pallet_streaming, Streaming);
 
             if batches.is_empty() { return Err("Benchmark not found for this pallet.".into()) }
             Ok(batches)

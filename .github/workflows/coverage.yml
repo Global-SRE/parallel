@@ -1,0 +1,78 @@
+name: Coverage
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches: [master]
+
+jobs:
+  coverage:
+    if: github.repository == 'parallel-finance/parallel'
+    name: Auto Codecov Coverage
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        rust: [nightly-2022-04-24]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@master
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+
+      - name: Install wasm32-unknown-unknown
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          target: wasm32-unknown-unknown
+          override: true
+
+      - uses: actions-rs/install@v0.1.2
+        with:
+          crate: cargo-tarpaulin
+          version: 0.20.0
+          use-tool-cache: true
+
+      # Work around https://github.com/actions/cache/issues/403 by using GNU tar
+      # instead of BSD tar.
+      - name: Install GNU tar
+        if: matrix.os == 'macOS-latest'
+        run: |
+          brew install gnu-tar
+          echo PATH="/usr/local/opt/gnu-tar/libexec/gnubin:$PATH" >> $GITHUB_ENV
+
+      - name: Cache cargo registry
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/registry
+          key: ${{ matrix.os }}-${{ matrix.rust }}-cargo-registry-${{ hashFiles('**/Cargo.toml') }}-${{ secrets.CACHE_VERSION }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/git
+          key: ${{ matrix.os }}-${{ matrix.rust }}-cargo-index-${{ hashFiles('**/Cargo.toml') }}-${{ secrets.CACHE_VERSION }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v1
+        with:
+          path: target
+          key: ${{ matrix.os }}-${{ matrix.rust }}-cargo-build-target-${{ hashFiles('**/Cargo.toml') }}-${{ secrets.CACHE_VERSION }}
+
+      - name: Generate code coverage
+        run: |
+          cargo +nightly-2022-04-24 tarpaulin --verbose --no-fail-fast -p pallet-loans -p pallet-stableswap -p pallet-liquid-staking -p pallet-farming -p pallet-prices -p pallet-amm -p pallet-router -p pallet-crowdloans -p pallet-emergency-shutdown -p pallet-asset-registry -p pallet-streaming --timeout 300 --out Xml
+
+      - name: Upload To Codecov.io
+        uses: codecov/codecov-action@v1
+        with:
+          token: ${{secrets.CODECOV_TOKEN}}
+          fail_ci_if_error: true

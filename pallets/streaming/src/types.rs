@@ -1,16 +1,23 @@
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::RuntimeDebug;
+use frame_support::{traits::UnixTime, RuntimeDebug};
 use primitives::Timestamp;
 use scale_info::TypeInfo;
 
 use crate::{AccountOf, AssetIdOf, BalanceOf, Config};
+use sp_runtime::{traits::Zero, ArithmeticError, DispatchError, DispatchResult};
 
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum StreamStatus {
-    // stream has not finished yet
-    Ongoing,
-    // stream is completed, remaining_balance should be zero
-    Completed,
+    // The stream has not completed yet
+    // as_collateral:
+    // - `false`: the stream is still in progress
+    // - `true`: the steam is in progress, but is being used as collateral
+    Ongoing { as_collateral: bool },
+    // The stream is completed
+    // cancelled:
+    // - `false`: remaining_balance should be zero
+    // - `true`: remaining_balance could be zero (or not be zero)
+    Completed { cancelled: bool },
 }
 
 #[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -19,31 +26,186 @@ pub enum StreamKind {
     Send,
     // Stream would be received by an account
     Receive,
-    // Can expand Cancel, Lock and other states if needed
+    // Stream was `Cancelled` or `Completed`
+    Finish,
 }
 
 #[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(T))]
 #[codec(mel_bound())]
-pub struct Stream<T: Config>
-// where Stream<T>: Encode
-{
-    // Remaining Balance
+pub struct Stream<T: Config> {
+    // The remaining balance can be claimed of the stream
     pub remaining_balance: BalanceOf<T>,
-    // Deposit
+    // The deposit amount of the stream
     pub deposit: BalanceOf<T>,
-    // Currency Id
+    // The asset id of the stream
     pub asset_id: AssetIdOf<T>,
-    // Rate Per Second
+    // The rate per-second of the stream
     pub rate_per_sec: BalanceOf<T>,
-    // Recipient
-    pub recipient: AccountOf<T>,
-    // Sender
+    // The sender of the stream
     pub sender: AccountOf<T>,
-    // Start Time
+    // The recipient of the stream
+    pub recipient: AccountOf<T>,
+    // The start time of the stream
     pub start_time: Timestamp,
-    // Stop Time
-    pub stop_time: Timestamp,
+    // The end time of the stream
+    pub end_time: Timestamp,
     // The current status of the stream
     pub status: StreamStatus,
+    // Whether the stream can be cancelled
+    pub cancellable: bool,
+}
+
+impl<T: Config> Stream<T> {
+    pub fn new(
+        deposit: BalanceOf<T>,
+        asset_id: AssetIdOf<T>,
+        rate_per_sec: BalanceOf<T>,
+        sender: AccountOf<T>,
+        recipient: AccountOf<T>,
+        start_time: Timestamp,
+        end_time: Timestamp,
+        cancellable: bool,
+    ) -> Self {
+        Self {
+            remaining_balance: deposit,
+            deposit,
+            asset_id,
+            rate_per_sec,
+            sender,
+            recipient,
+            start_time,
+            end_time,
+            status: StreamStatus::Ongoing {
+                as_collateral: false,
+            },
+            cancellable,
+        }
+    }
+
+    pub fn is_sender(&self, account: &AccountOf<T>) -> bool {
+        *account == self.sender
+    }
+
+    pub fn is_recipient(&self, account: &AccountOf<T>) -> bool {
+        *account == self.recipient
+    }
+
+    pub fn sender_balance(&self) -> Result<BalanceOf<T>, DispatchError> {
+        self.balance_of(&self.sender)
+    }
+
+    pub fn recipient_balance(&self) -> Result<BalanceOf<T>, DispatchError> {
+        self.balance_of(&self.recipient)
+    }
+
+    pub fn has_finished(&self) -> bool {
+        match &self.status {
+            StreamStatus::Ongoing { as_collateral: _ } => false,
+            StreamStatus::Completed { cancelled: _ } => true,
+        }
+    }
+
+    pub fn has_started(&self) -> Result<bool, DispatchError> {
+        let delta = self.delta_of()? as BalanceOf<T>;
+
+        Ok(!delta.is_zero())
+    }
+
+    fn claimed_balance(&self) -> Result<BalanceOf<T>, DispatchError> {
+        Ok(self
+            .deposit
+            .checked_sub(self.remaining_balance)
+            .ok_or(ArithmeticError::Underflow)?)
+    }
+
+    pub fn try_deduct(&mut self, amount: BalanceOf<T>) -> Result<BalanceOf<T>, DispatchError> {
+        self.remaining_balance = self
+            .remaining_balance
+            .checked_sub(amount)
+            .ok_or(ArithmeticError::Underflow)?;
+
+        Ok(self.remaining_balance)
+    }
+
+    pub fn try_complete(&mut self) -> DispatchResult {
+        if self.remaining_balance.is_zero() {
+            self.status = StreamStatus::Completed { cancelled: false };
+        }
+
+        Ok(())
+    }
+
+    pub fn try_cancel(&mut self, remaining_balance: BalanceOf<T>) -> DispatchResult {
+        self.remaining_balance = remaining_balance;
+        self.status = StreamStatus::Completed { cancelled: true };
+
+        Ok(())
+    }
+
+    pub fn as_collateral(&mut self) -> DispatchResult {
+        self.status = StreamStatus::Ongoing {
+            as_collateral: true,
+        };
+        self.cancellable = false;
+
+        Ok(())
+    }
+
+    pub fn delta_of(&self) -> Result<u64, DispatchError> {
+        let now = T::UnixTime::now().as_secs();
+        if now <= self.start_time {
+            Ok(Zero::zero())
+        } else if now < self.end_time {
+            now.checked_sub(self.start_time)
+                .ok_or(DispatchError::Arithmetic(ArithmeticError::Underflow))
+        } else {
+            self.end_time
+                .checked_sub(self.start_time)
+                .ok_or(DispatchError::Arithmetic(ArithmeticError::Underflow))
+        }
+    }
+
+    // Measure balance of stream with rate per sec
+    pub fn balance_of(&self, who: &AccountOf<T>) -> Result<BalanceOf<T>, DispatchError> {
+        let delta = self.delta_of()? as BalanceOf<T>;
+
+        /*
+         * If the stream `balance` does not equal `deposit`, it means there have been withdrawals.
+         * We have to subtract the total amount withdrawn from the amount of money that has been
+         * streamed until now.
+         */
+        let recipient_balance = if self.deposit > self.remaining_balance {
+            let claimed_amount = self.claimed_balance()?;
+            let recipient_balance = delta
+                .checked_mul(self.rate_per_sec)
+                .ok_or(ArithmeticError::Overflow)?;
+            recipient_balance
+                .checked_sub(claimed_amount)
+                .ok_or(ArithmeticError::Underflow)?
+        } else {
+            delta
+                .checked_mul(self.rate_per_sec)
+                .ok_or(ArithmeticError::Overflow)?
+        };
+
+        match *who {
+            ref _recipient if *who == self.recipient => {
+                if delta == (self.end_time - self.start_time).into() {
+                    Ok(self.remaining_balance)
+                } else {
+                    Ok(recipient_balance)
+                }
+            }
+            ref _sender if *who == self.sender => {
+                let sender_balance = self
+                    .remaining_balance
+                    .checked_sub(recipient_balance)
+                    .ok_or(ArithmeticError::Underflow)?;
+
+                Ok(sender_balance)
+            }
+            _ => Ok(Zero::zero()),
+        }
+    }
 }

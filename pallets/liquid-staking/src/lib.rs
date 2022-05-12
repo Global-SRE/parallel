@@ -1181,7 +1181,6 @@ pub mod pallet {
                 StakingLedgers::<T>::contains_key(&derivative_index),
                 Error::<T>::NotBonded
             );
-            Self::ensure_staking_ledger_cap(derivative_index, amount)?;
 
             log::trace!(
                 target: "liquidStaking::rebond",
@@ -1488,6 +1487,8 @@ pub mod pallet {
             if issuance.is_zero() {
                 return Ok(());
             }
+            // TODO: when one era has big amount of stakes, the exchange rate
+            // will not look great
             let new_exchange_rate = Rate::checked_from_rational(
                 total_active_bonded
                     .checked_add(matching_ledger.total_stake_amount.total)
@@ -1543,8 +1544,6 @@ pub mod pallet {
 
             Self::do_multi_withdraw_unbonded(T::NumSlashingSpans::get())?;
 
-            Self::do_update_exchange_rate()?;
-
             Self::deposit_event(Event::<T>::Matching(
                 bond_amount,
                 rebond_amount,
@@ -1570,8 +1569,8 @@ pub mod pallet {
             CurrentEra::<T>::mutate(|e| *e = e.saturating_add(offset));
 
             // ignore error
-            if let Err(e) = Self::do_matching() {
-                log::error!(target: "liquidStaking::do_advance_era", "Could not advance era! error: {:?}", &e);
+            if let Err(e) = Self::do_matching().and(Self::do_update_exchange_rate()) {
+                log::error!(target: "liquidStaking::do_advance_era", "advance era error caught: {:?}", &e);
             }
 
             Self::deposit_event(Event::<T>::NewEra(Self::current_era()));

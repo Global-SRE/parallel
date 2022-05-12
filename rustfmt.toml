@@ -1,0 +1,9 @@
+#we can enable all files check later
+#license_template_path = "LICENSE_TEMPLATE"
+ignore = [
+  "weights.rs",
+  "runtime/heiko/src/weights",
+  "runtime/parallel/src/weights",
+  "runtime/kerria/src/weights",
+  "runtime/vanilla/src/weights",
+]
